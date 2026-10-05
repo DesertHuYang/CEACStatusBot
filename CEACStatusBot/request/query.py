@@ -1,6 +1,7 @@
 import time
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
+from playwright_stealth import stealth_sync
 
 from CEACStatusBot.captcha import CaptchaHandle, OnnxCaptchaHandle
 
@@ -20,46 +21,47 @@ def query_status(location, application_num, passport_number, surname, captchaHan
 
         try:
             with sync_playwright() as p:
-                # 启动 Chromium，配置抹除无头特征参数
+                # 启动 Chromium 并禁用自动化控制标志
                 browser = p.chromium.launch(
                     headless=True,
                     args=[
                         "--disable-blink-features=AutomationControlled",
                         "--no-sandbox",
                         "--disable-setuid-sandbox",
+                        "--disable-infobars",
+                        "--window-size=1920,1080",
                     ]
                 )
+                
+                # 配置接近真实 Chrome 的 Context
                 context = browser.new_context(
                     user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-                    viewport={"width": 1366, "height": 768},
+                    viewport={"width": 1920, "height": 1080},
                     locale="en-US",
                     timezone_id="America/New_York",
                 )
 
                 page = context.new_page()
 
-                # 隐藏 navigator.webdriver 特征，防止被 Cloudflare 拦截
-                page.add_init_script("""
-                    Object.defineProperty(navigator, 'webdriver', {
-                        get: () => undefined
-                    });
-                """)
+                # 应用 stealth 隐匿补丁
+                stealth_sync(page)
 
-                # 1. 打开页面（使用 domcontentloaded 避免 networkidle 超时）
+                # 1. 访问目标页面
                 url = f"{ROOT}/ceacstattracker/status.aspx?App=NIV"
                 print("Navigating to CEAC page...")
-                page.goto(url, wait_until="domcontentloaded", timeout=45000)
+                page.goto(url, wait_until="domcontentloaded", timeout=60000)
 
-                # 2. 等待 Cloudflare JS 5秒盾验证通过，直到真实的验证码图片加载完成
+                # 2. 给予 Cloudflare 5秒盾自动通过的时间，并等待验证码图片出现
                 captcha_img_selector = "#c_status_ctl00_contentplaceholder1_defaultcaptcha_CaptchaImage"
                 try:
+                    # 如果弹出 5 秒盾，页面会自动刷新/验证，这里等待验证码渲染
                     page.wait_for_selector(captcha_img_selector, state="visible", timeout=30000)
                 except Exception:
-                    print("--> [DEBUG] 未能加载验证码，页面标题:", page.title())
+                    print("--> [DEBUG] 未能加载验证码，当前页面标题:", page.title())
                     browser.close()
                     continue
 
-                # 3. 截取当前页面上渲染出的验证码图片
+                # 3. 截取当前页面上的验证码图片
                 captcha_element = page.query_selector(captcha_img_selector)
                 captcha_bytes = captcha_element.screenshot()
 
@@ -97,11 +99,10 @@ def query_status(location, application_num, passport_number, surname, captchaHan
                 page.fill("#ctl00_ContentPlaceHolder1_Surname", surname)
                 page.fill("#ctl00_ContentPlaceHolder1_Captcha", captcha_num)
 
-                # 7. 提交表单并等待结果加载
+                # 7. 提交表单
                 page.click("#ctl00_ContentPlaceHolder1_btnSubmit")
                 
                 try:
-                    # 等待状态显示控件出现，最长 20 秒
                     page.wait_for_selector("#ctl00_ContentPlaceHolder1_ucApplicationStatusView_lblStatus", timeout=20000)
                 except Exception:
                     print("--> [DEBUG] 提交后未检测到结果页面，可能验证码识别错误，准备重试...")
