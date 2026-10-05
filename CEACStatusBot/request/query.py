@@ -20,7 +20,7 @@ def query_status(location, application_num, passport_number, surname, captchaHan
 
         try:
             with sync_playwright() as p:
-                # 关键：开启浏览器防检测配置
+                # 启动 Chromium，配置抹除无头特征参数
                 browser = p.chromium.launch(
                     headless=True,
                     args=[
@@ -38,38 +38,28 @@ def query_status(location, application_num, passport_number, surname, captchaHan
 
                 page = context.new_page()
 
-                # 注入 JavaScript 覆盖 navigator.webdriver 标志，防止被 Cloudflare 识别为 Bot
+                # 隐藏 navigator.webdriver 特征，防止被 Cloudflare 拦截
                 page.add_init_script("""
                     Object.defineProperty(navigator, 'webdriver', {
                         get: () => undefined
                     });
                 """)
 
-                # 1. 打开页面：使用 domcontentloaded 代替 networkidle 避免超时
+                # 1. 打开页面（使用 domcontentloaded 避免 networkidle 超时）
                 url = f"{ROOT}/ceacstattracker/status.aspx?App=NIV"
                 print("Navigating to CEAC page...")
-                page.goto(url, wait_until="networkidle", timeout=60000)
+                page.goto(url, wait_until="domcontentloaded", timeout=45000)
 
-                # 保存当前页面截图
-                page.screenshot(path="debug_page.png", full_page=True)
-                # 保存当前页面 HTML 源码
-                with open("debug_page.html", "w", encoding="utf-8") as f:
-                    f.write(page.content())
-
-                # 2. 给予 Cloudflare 自检页面（Turnstile Challenge）通过的时间
+                # 2. 等待 Cloudflare JS 5秒盾验证通过，直到真实的验证码图片加载完成
                 captcha_img_selector = "#c_status_ctl00_contentplaceholder1_defaultcaptcha_CaptchaImage"
-                
-                # 等待验证码图片出现，最多等待 30 秒
                 try:
                     page.wait_for_selector(captcha_img_selector, state="visible", timeout=30000)
                 except Exception:
-                    print("未能找到验证码元素，可能仍被 Cloudflare 拦截或页面加载缓慢。")
-                    # 保存截图供调试（可选）
-                    # page.screenshot(path="cf_blocked.png")
+                    print("--> [DEBUG] 未能加载验证码，页面标题:", page.title())
                     browser.close()
                     continue
 
-                # 3. 截取验证码图片
+                # 3. 截取当前页面上渲染出的验证码图片
                 captcha_element = page.query_selector(captcha_img_selector)
                 captcha_bytes = captcha_element.screenshot()
 
@@ -77,10 +67,10 @@ def query_status(location, application_num, passport_number, surname, captchaHan
                 captcha_num = captchaHandle.solve(captcha_bytes)
                 print(f"Captcha solved: {captcha_num}")
 
-                # 5. 获取并选择 Location
+                # 5. 获取并选择 Location 下拉框
                 location_select = page.query_selector("#ctl00_ContentPlaceHolder1_Location_Dropdown")
                 if not location_select:
-                    print("未找到 Location 下拉框")
+                    print("--> [DEBUG] 未找到 Location 下拉框")
                     browser.close()
                     continue
 
@@ -101,22 +91,22 @@ def query_status(location, application_num, passport_number, surname, captchaHan
 
                 page.select_option("#ctl00_ContentPlaceHolder1_Location_Dropdown", location_value)
 
-                # 6. 填写表单
+                # 6. 填写表单字段
                 page.fill("#ctl00_ContentPlaceHolder1_Visa_Case_Number", application_num)
                 page.fill("#ctl00_ContentPlaceHolder1_Passport_Number", passport_number)
                 page.fill("#ctl00_ContentPlaceHolder1_Surname", surname)
                 page.fill("#ctl00_ContentPlaceHolder1_Captcha", captcha_num)
 
-                # 7. 提交表单并等待响应
+                # 7. 提交表单并等待结果加载
                 page.click("#ctl00_ContentPlaceHolder1_btnSubmit")
                 
-                # 等待状态显示区域或错误提示出现
                 try:
+                    # 等待状态显示控件出现，最长 20 秒
                     page.wait_for_selector("#ctl00_ContentPlaceHolder1_ucApplicationStatusView_lblStatus", timeout=20000)
                 except Exception:
-                    print("提交后未能看到状态结果，可能验证码错误或提交失败。")
+                    print("--> [DEBUG] 提交后未检测到结果页面，可能验证码识别错误，准备重试...")
 
-                # 8. 解析结果
+                # 8. 解析网页内容
                 content = page.content()
                 browser.close()
 
@@ -124,7 +114,6 @@ def query_status(location, application_num, passport_number, surname, captchaHan
                 status_tag = soup.find("span", id="ctl00_ContentPlaceHolder1_ucApplicationStatusView_lblStatus")
                 
                 if not status_tag:
-                    print("未能获取状态，准备重试...")
                     continue
 
                 application_num_returned = soup.find("span", id="ctl00_ContentPlaceHolder1_ucApplicationStatusView_lblCaseNo").string
@@ -149,7 +138,7 @@ def query_status(location, application_num, passport_number, surname, captchaHan
                 break
 
         except Exception as e:
-            print(f"Playwright execution error: {e}")
+            print(f"--> [DEBUG] Playwright Exception: {e}")
             continue
 
     return result
