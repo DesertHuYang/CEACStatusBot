@@ -23,7 +23,7 @@ jobs:
 
       - name: Install Playwright
         run: |
-          uv pip install playwright
+          uv pip install playwright playwright-stealth
           uv run python -m playwright install --with-deps chromium
 
       - name: Execute py script
