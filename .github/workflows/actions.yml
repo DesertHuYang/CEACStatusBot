@@ -33,8 +33,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install uv
           uv sync || true
-          uv pip install --system playwright
-          playwright install --with-deps chromium
+          uv pip install playwright
+          uv run python -m playwright install --with-deps chromium
 
       - name: Execute py script
         env:
