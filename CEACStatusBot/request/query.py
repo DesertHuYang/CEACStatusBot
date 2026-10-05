@@ -48,7 +48,7 @@ def query_status(location, application_num, passport_number, surname, captchaHan
                 # 1. 打开页面：使用 domcontentloaded 代替 networkidle 避免超时
                 url = f"{ROOT}/ceacstattracker/status.aspx?App=NIV"
                 print("Navigating to CEAC page...")
-                page.goto(url, wait_until="domcontentloaded", timeout=45000)
+                page.goto(url, wait_until="networkidle", timeout=60000)
 
                 # 保存当前页面截图
                 page.screenshot(path="debug_page.png", full_page=True)
