@@ -50,6 +50,12 @@ def query_status(location, application_num, passport_number, surname, captchaHan
                 print("Navigating to CEAC page...")
                 page.goto(url, wait_until="domcontentloaded", timeout=45000)
 
+                # 保存当前页面截图
+                page.screenshot(path="debug_page.png", full_page=True)
+                # 保存当前页面 HTML 源码
+                with open("debug_page.html", "w", encoding="utf-8") as f:
+                    f.write(page.content())
+
                 # 2. 给予 Cloudflare 自检页面（Turnstile Challenge）通过的时间
                 captcha_img_selector = "#c_status_ctl00_contentplaceholder1_defaultcaptcha_CaptchaImage"
                 
