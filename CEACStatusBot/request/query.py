@@ -1,6 +1,6 @@
-import requests
-from bs4 import BeautifulSoup
 import time
+from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright
 
 from CEACStatusBot.captcha import CaptchaHandle, OnnxCaptchaHandle
 
@@ -10,118 +10,115 @@ def query_status(location, application_num, passport_number, surname, captchaHan
         "success": False,
     }
     backupTime = 5
+    ROOT = "https://ceac.state.gov"
 
     while failCount < 5:
         if failCount > 0:
             print(f"Retrying... Attempt {failCount + 1} / 5 in {backupTime} seconds")
             time.sleep(backupTime)
         failCount += 1
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/105.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9",
-            "Accept-Encoding": "gzip, deflate, br",
-            "Accept-Language": "en,zh-CN;q=0.9,zh;q=0.8",
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "Host": "ceac.state.gov",
-        }
-
-        session = requests.Session()
-        ROOT = "https://ceac.state.gov"
 
         try:
-            r = session.get(url=f"{ROOT}/ceacstattracker/status.aspx?App=NIV", headers=headers)
-        except Exception as e:
-            print(e)
-            continue
+            with sync_playwright() as p:
+                # 启动 Chromium 浏览器，设置真实 User-Agent
+                browser = p.chromium.launch(headless=True)
+                context = browser.new_context(
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    viewport={"width": 1280, "height": 800}
+                )
+                page = context.new_page()
 
-        soup = BeautifulSoup(r.text, features="lxml")
+                # 1. 打开 CEAC 页面并等待加载完成（自动过 Cloudflare JS 验证）
+                url = f"{ROOT}/ceacstattracker/status.aspx?App=NIV"
+                page.goto(url, wait_until="networkidle", timeout=60000)
 
-        # Find captcha image
-        captcha = soup.find(name="img", id="c_status_ctl00_contentplaceholder1_defaultcaptcha_CaptchaImage")
-        image_url = ROOT + captcha["src"]
-        img_resp = session.get(image_url)
+                # 检查验证码图片元素是否存在
+                captcha_img_selector = "#c_status_ctl00_contentplaceholder1_defaultcaptcha_CaptchaImage"
+                try:
+                    page.wait_for_selector(captcha_img_selector, timeout=15000)
+                except Exception:
+                    print("未能找到验证码元素，可能仍被 Cloudflare 拦截或页面超时。")
+                    browser.close()
+                    continue
 
-        # Resolve captcha
-        captcha_num = captchaHandle.solve(img_resp.content)
-        print(f"Captcha solved: {captcha_num}")
+                # 2. 截图获取验证码图片（直接截取验证码元素的 bytes）
+                captcha_element = page.query_selector(captcha_img_selector)
+                captcha_bytes = captcha_element.screenshot()
 
-        # Find the correct value for the location dropdown
-        location_dropdown = soup.find("select", id="Location_Dropdown")
-        location_value = None
-        for option in location_dropdown.find_all("option"):
-            if location in option.text:
-                location_value = option["value"]
+                # 3. 识别验证码
+                captcha_num = captchaHandle.solve(captcha_bytes)
+                print(f"Captcha solved: {captcha_num}")
+
+                # 4. 选择 Location 下拉框
+                location_select = page.query_selector("#ctl00_ContentPlaceHolder1_Location_Dropdown")
+                if not location_select:
+                    print("未找到 Location 下拉框")
+                    browser.close()
+                    continue
+
+                # 在下拉选项中匹配 location 文本并选中 value
+                options = page.eval_on_selector_all(
+                    "#ctl00_ContentPlaceHolder1_Location_Dropdown option",
+                    "opts => opts.map(o => ({text: o.innerText, value: o.value}))"
+                )
+                location_value = None
+                for opt in options:
+                    if location in opt["text"]:
+                        location_value = opt["value"]
+                        break
+
+                if not location_value:
+                    print("Location not found in dropdown options.")
+                    browser.close()
+                    return {"success": False}
+
+                page.select_option("#ctl00_ContentPlaceHolder1_Location_Dropdown", location_value)
+
+                # 5. 填写表单其他字段
+                page.fill("#ctl00_ContentPlaceHolder1_Visa_Case_Number", application_num)
+                page.fill("#ctl00_ContentPlaceHolder1_Passport_Number", passport_number)
+                page.fill("#ctl00_ContentPlaceHolder1_Surname", surname)
+                page.fill("#ctl00_ContentPlaceHolder1_Captcha", captcha_num)
+
+                # 6. 点击提交按钮并等待网络请求响应/页面更新
+                with page.expect_navigation(wait_until="networkidle", timeout=30000):
+                    page.click("#ctl00_ContentPlaceHolder1_btnSubmit")
+
+                # 7. 解析返回的结果页面
+                content = page.content()
+                browser.close()
+
+                soup = BeautifulSoup(content, features="lxml")
+                status_tag = soup.find("span", id="ctl00_ContentPlaceHolder1_ucApplicationStatusView_lblStatus")
+                
+                # 如果没找到 status，可能是验证码填错或其他错误，进入下一次重试
+                if not status_tag:
+                    print("未能获取状态，可能验证码识别错误，尝试重试...")
+                    continue
+
+                application_num_returned = soup.find("span", id="ctl00_ContentPlaceHolder1_ucApplicationStatusView_lblCaseNo").string
+                assert application_num_returned == application_num
+                status = status_tag.string
+                visa_type = soup.find("span", id="ctl00_ContentPlaceHolder1_ucApplicationStatusView_lblAppName").string
+                case_created = soup.find("span", id="ctl00_ContentPlaceHolder1_ucApplicationStatusView_lblSubmitDate").string
+                case_last_updated = soup.find("span", id="ctl00_ContentPlaceHolder1_ucApplicationStatusView_lblStatusDate").string
+                description = soup.find("span", id="ctl00_ContentPlaceHolder1_ucApplicationStatusView_lblMessage").string
+
+                result.update({
+                    "success": True,
+                    "time": str(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())),
+                    "visa_type": visa_type,
+                    "status": status,
+                    "case_created": case_created,
+                    "case_last_updated": case_last_updated,
+                    "description": description,
+                    "application_num": application_num_returned,
+                    "application_num_origin": application_num
+                })
                 break
 
-        if not location_value:
-            print("Location not found in dropdown options.")
-            return {"success": False}
-
-        # Fill form
-        def update_from_current_page(cur_page, name, data):
-            ele = cur_page.find(name="input", attrs={"name": name})
-            if ele:
-                data[name] = ele["value"]
-
-        data = {
-            "ctl00$ToolkitScriptManager1": "ctl00$ContentPlaceHolder1$UpdatePanel1|ctl00$ContentPlaceHolder1$btnSubmit",
-            "ctl00_ToolkitScriptManager1_HiddenField": ";;AjaxControlToolkit, Version=4.1.40412.0, Culture=neutral, PublicKeyToken=28f01b0e84b6d53e:en-US:acfc7575-cdee-46af-964f-5d85d9cdcf92:de1feab2:f9cec9bc:a67c2700:f2c8e708:8613aea7:3202a5a2:ab09e3fe:87104b7c:be6fb298",
-            "__EVENTTARGET": "ctl00$ContentPlaceHolder1$btnSubmit",
-            "__EVENTARGUMENT": "",
-            "__LASTFOCUS": "",
-            "__VIEWSTATE": "8GJOG5GAuT1ex7KX3jakWssS08FPVm5hTO2feqUpJk8w5ukH4LG/o39O4OFGzy/f2XLN8uMeXUQBDwcO9rnn5hdlGUfb2IOmzeTofHrRNmB/hwsFyI4mEx0mf7YZo19g",
-            "__VIEWSTATEGENERATOR": "DBF1011F",
-            "__VIEWSTATEENCRYPTED": "",
-            "ctl00$ContentPlaceHolder1$Visa_Application_Type": "NIV",
-            "ctl00$ContentPlaceHolder1$Location_Dropdown": location_value,  # Use the correct value
-            "ctl00$ContentPlaceHolder1$Visa_Case_Number": application_num,
-            "ctl00$ContentPlaceHolder1$Captcha": captcha_num,
-            "ctl00$ContentPlaceHolder1$Passport_Number": passport_number,
-            "ctl00$ContentPlaceHolder1$Surname": surname,
-            "LBD_VCID_c_status_ctl00_contentplaceholder1_defaultcaptcha": "a81747f3a56d4877bf16e1a5450fb944",
-            "LBD_BackWorkaround_c_status_ctl00_contentplaceholder1_defaultcaptcha": "1",
-            "__ASYNCPOST": "true",
-        }
-
-        fields_need_update = [
-            "__VIEWSTATE",
-            "__VIEWSTATEGENERATOR",
-            "LBD_VCID_c_status_ctl00_contentplaceholder1_defaultcaptcha",
-        ]
-        for field in fields_need_update:
-            update_from_current_page(soup, field, data)
-
-        try:
-            r = session.post(url=f"{ROOT}/ceacstattracker/status.aspx", headers=headers, data=data)
         except Exception as e:
-            print(e)
+            print(f"Playwright execution error: {e}")
             continue
-
-        soup = BeautifulSoup(r.text, features="lxml")
-        status_tag = soup.find("span", id="ctl00_ContentPlaceHolder1_ucApplicationStatusView_lblStatus")
-        if not status_tag:
-            continue
-
-        application_num_returned = soup.find("span", id="ctl00_ContentPlaceHolder1_ucApplicationStatusView_lblCaseNo").string
-        assert application_num_returned == application_num
-        status = status_tag.string
-        visa_type = soup.find("span", id="ctl00_ContentPlaceHolder1_ucApplicationStatusView_lblAppName").string
-        case_created = soup.find("span", id="ctl00_ContentPlaceHolder1_ucApplicationStatusView_lblSubmitDate").string
-        case_last_updated = soup.find("span", id="ctl00_ContentPlaceHolder1_ucApplicationStatusView_lblStatusDate").string
-        description = soup.find("span", id="ctl00_ContentPlaceHolder1_ucApplicationStatusView_lblMessage").string
-
-        result.update({
-            "success": True,
-            "time": str(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())),
-            "visa_type": visa_type,
-            "status": status,
-            "case_created": case_created,
-            "case_last_updated": case_last_updated,
-            "description": description,
-            "application_num": application_num_returned,
-            "application_num_origin": application_num
-        })
-        break
 
     return result
