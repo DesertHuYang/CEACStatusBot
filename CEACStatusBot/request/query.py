@@ -31,6 +31,12 @@ def query_status(location, application_num, passport_number, surname, captchaHan
 
         try:
             r = session.get(url=f"{ROOT}/ceacstattracker/status.aspx?App=NIV", headers=headers, timeout=30)
+            # =============== 调试输出开始 ===============
+            print(f"--> [DEBUG] GET Status Code: {r.status_code}")
+            print("::group::[DEBUG] GET Response HTML Content")
+            print(r.text)
+            print("::endgroup::")
+            # =============== 调试输出结束 ===============
         except Exception as e:
             print(e)
             continue
