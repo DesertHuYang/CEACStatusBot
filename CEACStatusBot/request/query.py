@@ -1,7 +1,6 @@
 import time
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
-from playwright_stealth import stealth_sync
 
 from CEACStatusBot.captcha import CaptchaHandle, OnnxCaptchaHandle
 
@@ -21,7 +20,7 @@ def query_status(location, application_num, passport_number, surname, captchaHan
 
         try:
             with sync_playwright() as p:
-                # 启动 Chromium 并禁用自动化控制标志
+                # 启动 Chromium 并关闭自动化标志与 Chrome 特征标记
                 browser = p.chromium.launch(
                     headless=True,
                     args=[
@@ -33,29 +32,52 @@ def query_status(location, application_num, passport_number, surname, captchaHan
                     ]
                 )
                 
-                # 配置接近真实 Chrome 的 Context
+                # 配置真实的 Windows Chrome 上下文
                 context = browser.new_context(
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
                     viewport={"width": 1920, "height": 1080},
                     locale="en-US",
                     timezone_id="America/New_York",
+                    device_scale_factor=1,
+                    has_touch=False,
+                    is_mobile=False,
                 )
 
                 page = context.new_page()
 
-                # 应用 stealth 隐匿补丁
-                stealth_sync(page)
+                # 注入抹除常见 Headless 痕迹的 JavaScript
+                page.add_init_script("""
+                    // 隐藏 navigator.webdriver
+                    Object.defineProperty(navigator, 'webdriver', {
+                        get: () => undefined
+                    });
+                    
+                    # 伪装 languages
+                    Object.defineProperty(navigator, 'languages', {
+                        get: () => ['en-US', 'en']
+                    });
+                    
+                    # 伪装 plugins 长度
+                    Object.defineProperty(navigator, 'plugins', {
+                        get: () => [1, 2, 3, 4, 5]
+                    });
+                    
+                    # 伪装 chrome 对象
+                    window.chrome = {
+                        runtime: {}
+                    };
+                """)
 
                 # 1. 访问目标页面
                 url = f"{ROOT}/ceacstattracker/status.aspx?App=NIV"
                 print("Navigating to CEAC page...")
                 page.goto(url, wait_until="domcontentloaded", timeout=60000)
 
-                # 2. 给予 Cloudflare 5秒盾自动通过的时间，并等待验证码图片出现
+                # 2. 等待 Cloudflare 5秒盾跳转并渲染出验证码图片
                 captcha_img_selector = "#c_status_ctl00_contentplaceholder1_defaultcaptcha_CaptchaImage"
                 try:
-                    # 如果弹出 5 秒盾，页面会自动刷新/验证，这里等待验证码渲染
-                    page.wait_for_selector(captcha_img_selector, state="visible", timeout=30000)
+                    # 给 Cloudflare 充分的跳转与验证时间，最长等待 35 秒
+                    page.wait_for_selector(captcha_img_selector, state="visible", timeout=35000)
                 except Exception:
                     print("--> [DEBUG] 未能加载验证码，当前页面标题:", page.title())
                     browser.close()
